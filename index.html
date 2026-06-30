@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+<title>虹色ウォーターフォン</title>
+<style>
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #07101f;
+    touch-action: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+    color: white;
+  }
+  #app {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 35%, #263d78, #07101f 70%);
+  }
+  canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .ui {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: max(20px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
+    box-sizing: border-box;
+    text-shadow: 0 2px 12px rgba(0,0,0,.45);
+  }
+  .top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    opacity: .92;
+  }
+  .title {
+    font-size: clamp(21px, 5vw, 34px);
+    letter-spacing: .08em;
+    font-weight: 300;
+  }
+  .pill {
+    padding: 8px 12px;
+    border: 1px solid rgba(255,255,255,.35);
+    border-radius: 999px;
+    backdrop-filter: blur(8px);
+    background: rgba(255,255,255,.08);
+    font-size: 13px;
+  }
+  .bottom {
+    display: grid;
+    gap: 12px;
+    justify-items: center;
+    opacity: .9;
+  }
+  .modeRow {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  button {
+    pointer-events: auto;
+    color: white;
+    border: 1px solid rgba(255,255,255,.35);
+    background: rgba(255,255,255,.10);
+    border-radius: 999px;
+    padding: 10px 14px;
+    font-size: 14px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  }
+  button.active {
+    background: rgba(255,255,255,.28);
+    border-color: rgba(255,255,255,.65);
+  }
+  .hint {
+    font-size: 13px;
+    opacity: .82;
+    text-align: center;
+    line-height: 1.6;
+  }
+  .meter {
+    width: min(420px, 86vw);
+    height: 48px;
+    border-radius: 24px;
+    border: 1px solid rgba(255,255,255,.16);
+    background: rgba(0,0,0,.12);
+    backdrop-filter: blur(8px);
+    position: relative;
+    overflow: hidden;
+  }
+  .glow {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 38px;
+    height: 38px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: radial-gradient(circle, #fff, rgba(143,217,255,.75), rgba(255,255,255,0) 70%);
+    box-shadow: 0 0 22px rgba(255,255,255,.7);
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="water"></canvas>
+  <div class="ui">
+    <div class="top">
+      <div class="pill">傾き：<span id="tiltText">OFF</span></div>
+      <div class="title">Waterphone</div>
+      <div class="pill">音：<span id="soundText">OFF</span></div>
+    </div>
+    <div></div>
+    <div class="bottom">
+      <div class="modeRow">
+        <button id="soundBtn">音をON</button>
+        <button id="tiltBtn">傾きをON</button>
+        <button id="calmBtn">静かにする</button>
+      </div>
+      <div class="meter"><div class="glow" id="glow"></div></div>
+      <div class="hint">画面を触ると波紋。なぞると不思議な音。<br>スマホを傾けると水面と音がゆっくり揺れます。</div>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('water');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const soundBtn = document.getElementById('soundBtn');
+  const tiltBtn = document.getElementById('tiltBtn');
+  const calmBtn = document.getElementById('calmBtn');
+  const soundText = document.getElementById('soundText');
+  const tiltText = document.getElementById('tiltText');
+  const glow = document.getElementById('glow');
+
+  let W = 0, H = 0, DPR = 1;
+  let time = 0;
+  let ripples = [];
+  let pointers = new Map();
+  let tiltX = 0, tiltY = 0;
+  let targetTiltX = 0, targetTiltY = 0;
+  let tiltEnabled = false;
+  let soundEnabled = false;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.floor(innerWidth * DPR);
+    H = Math.floor(innerHeight * DPR);
+    canvas.width = W;
+    canvas.height = H;
+    canvas.style.width = innerWidth + 'px';
+    canvas.style.height = innerHeight + 'px';
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  let audioCtx = null;
+  let master = null;
+  let delay = null;
+  let reverb = null;
+  const voices = new Map();
+
+  function makeImpulse(ctx, seconds = 3.0, decay = 4.5) {
+    const rate = ctx.sampleRate;
+    const length = rate * seconds;
+    const impulse = ctx.createBuffer(2, length, rate);
+    for (let c = 0; c < 2; c++) {
+      const data = impulse.getChannelData(c);
+      for (let i = 0; i < length; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+      }
+    }
+    return impulse;
+  }
+
+  function initAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    master = audioCtx.createGain();
+    master.gain.value = 0.55;
+    delay = audioCtx.createDelay();
+    delay.delayTime.value = 0.18;
+    const feedback = audioCtx.createGain();
+    feedback.gain.value = 0.32;
+    reverb = audioCtx.createConvolver();
+    reverb.buffer = makeImpulse(audioCtx);
+    const wet = audioCtx.createGain();
+    wet.gain.value = 0.28;
+    delay.connect(feedback).connect(delay);
+    master.connect(audioCtx.destination);
+    master.connect(delay).connect(wet).connect(audioCtx.destination);
+    master.connect(reverb).connect(wet);
+  }
+
+  function startVoice(id, x, y) {
+    if (!soundEnabled) return;
+    initAudio();
+    const now = audioCtx.currentTime;
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.06);
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = 13;
+    const trem = audioCtx.createOscillator();
+    const tremGain = audioCtx.createGain();
+    trem.frequency.value = 5 + Math.random() * 4;
+    tremGain.gain.value = 0.035;
+    trem.connect(tremGain).connect(gain.gain);
+    trem.start();
+
+    const oscs = [];
+    for (let i = 0; i < 4; i++) {
+      const osc = audioCtx.createOscillator();
+      const og = audioCtx.createGain();
+      osc.type = i === 0 ? 'sine' : (i === 1 ? 'triangle' : 'sawtooth');
+      og.gain.value = 0.045 / (i + 1);
+      osc.connect(og).connect(filter);
+      osc.start(now);
+      oscs.push({ osc, og, ratio: [1, 2.01, 2.97, 4.13][i] });
+    }
+    filter.connect(gain).connect(master);
+    voices.set(id, { oscs, filter, gain, trem, lastX: x, lastY: y, lastT: performance.now() });
+    updateVoice(id, x, y, true);
+  }
+
+  function updateVoice(id, x, y, instant = false) {
+    const v = voices.get(id);
+    if (!v || !audioCtx) return;
+    const nowMs = performance.now();
+    const dx = x - v.lastX;
+    const dy = y - v.lastY;
+    const dt = Math.max(16, nowMs - v.lastT);
+    const speed = Math.min(1, Math.hypot(dx, dy) / dt * 1.8);
+    v.lastX = x; v.lastY = y; v.lastT = nowMs;
+    const nx = x / innerWidth;
+    const ny = y / innerHeight;
+    const base = 110 + nx * 520 + tiltX * 55 + Math.sin(time * 0.9 + nx * 6) * 18;
+    const bend = 1 + (tiltY * 0.04) + (speed * 0.055);
+    const when = audioCtx.currentTime + (instant ? 0 : 0.012);
+    v.filter.frequency.linearRampToValueAtTime(400 + ny * 2200 + speed * 1800, when + 0.04);
+    v.filter.Q.linearRampToValueAtTime(8 + speed * 18, when + 0.04);
+    v.gain.gain.linearRampToValueAtTime(0.07 + speed * 0.15, when + 0.04);
+    v.oscs.forEach((o, i) => {
+      const wobble = 1 + Math.sin(time * (1.4 + i * .27) + i) * 0.006;
+      o.osc.frequency.linearRampToValueAtTime(base * o.ratio * bend * wobble, when + 0.05);
+    });
+  }
+
+  function stopVoice(id) {
+    const v = voices.get(id);
+    if (!v || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    v.gain.gain.cancelScheduledValues(now);
+    v.gain.gain.setTargetAtTime(0.0001, now, 0.12);
+    setTimeout(() => {
+      try { v.oscs.forEach(o => o.osc.stop()); v.trem.stop(); } catch(e) {}
+    }, 700);
+    voices.delete(id);
+  }
+
+  function tapPing(x, y, power = 1) {
+    if (!soundEnabled) return;
+    initAudio();
+    const now = audioCtx.currentTime;
+    const nx = x / innerWidth;
+    const freq = 180 + nx * 760 + tiltX * 40;
+    for (let i = 0; i < 3; i++) {
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = i === 0 ? 'sine' : 'triangle';
+      osc.frequency.value = freq * [1, 2.35, 3.9][i];
+      g.gain.setValueAtTime(0.16 * power / (i + 1), now);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.9 + i * 0.45);
+      osc.connect(g).connect(master);
+      osc.start(now);
+      osc.stop(now + 1.8);
+    }
+  }
+
+  function addRipple(x, y, strength = 1) {
+    ripples.push({
+      x: x * DPR, y: y * DPR,
+      age: 0,
+      speed: (1.8 + Math.random() * .7) * DPR,
+      strength,
+      hue: Math.random() * 360
+    });
+    if (ripples.length > 60) ripples.shift();
+  }
+
+  function pointerDown(e) {
+    e.preventDefault();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, lastRipple: 0 });
+    addRipple(e.clientX, e.clientY, 1.4);
+    tapPing(e.clientX, e.clientY, 1);
+    startVoice(e.pointerId, e.clientX, e.clientY);
+  }
+  function pointerMove(e) {
+    e.preventDefault();
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    p.x = e.clientX; p.y = e.clientY;
+    const now = performance.now();
+    if (now - p.lastRipple > 70) {
+      addRipple(e.clientX, e.clientY, .65);
+      p.lastRipple = now;
+    }
+    updateVoice(e.pointerId, e.clientX, e.clientY);
+  }
+  function pointerUp(e) {
+    const p = pointers.get(e.pointerId);
+    if (p) addRipple(p.x, p.y, .8);
+    stopVoice(e.pointerId);
+    pointers.delete(e.pointerId);
+  }
+  canvas.addEventListener('pointerdown', pointerDown);
+  canvas.addEventListener('pointermove', pointerMove);
+  canvas.addEventListener('pointerup', pointerUp);
+  canvas.addEventListener('pointercancel', pointerUp);
+
+  soundBtn.addEventListener('click', async () => {
+    soundEnabled = !soundEnabled;
+    if (soundEnabled) {
+      initAudio();
+      await audioCtx.resume();
+    } else {
+      [...voices.keys()].forEach(stopVoice);
+    }
+    soundBtn.classList.toggle('active', soundEnabled);
+    soundBtn.textContent = soundEnabled ? '音をOFF' : '音をON';
+    soundText.textContent = soundEnabled ? 'ON' : 'OFF';
+  });
+
+  tiltBtn.addEventListener('click', async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try { await DeviceOrientationEvent.requestPermission(); } catch(e) {}
+    }
+    tiltEnabled = !tiltEnabled;
+    tiltBtn.classList.toggle('active', tiltEnabled);
+    tiltBtn.textContent = tiltEnabled ? '傾きOFF' : '傾きをON';
+    tiltText.textContent = tiltEnabled ? 'ON' : 'OFF';
+  });
+
+  calmBtn.addEventListener('click', () => {
+    ripples = [];
+    tapPing(innerWidth/2, innerHeight/2, .45);
+  });
+
+  window.addEventListener('deviceorientation', e => {
+    if (!tiltEnabled) return;
+    targetTiltX = Math.max(-1, Math.min(1, (e.gamma || 0) / 35));
+    targetTiltY = Math.max(-1, Math.min(1, (e.beta || 0) / 45));
+  });
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, W, H);
+    const shift = (Math.sin(time * .13) + 1) * 60;
+    g.addColorStop(0, `hsl(${220 + shift}, 72%, 16%)`);
+    g.addColorStop(.25, `hsl(${280 + shift}, 86%, 36%)`);
+    g.addColorStop(.5, `hsl(${185 + shift}, 88%, 37%)`);
+    g.addColorStop(.75, `hsl(${48 + shift}, 95%, 58%)`);
+    g.addColorStop(1, `hsl(${315 + shift}, 83%, 24%)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < 34; i++) {
+      const y = (H * (i / 33)) + Math.sin(time * .9 + i * .43) * 14 * DPR + tiltY * 40 * DPR;
+      const amp = 16 * DPR + Math.sin(i) * 6 * DPR;
+      ctx.beginPath();
+      for (let x = -20 * DPR; x <= W + 20 * DPR; x += 18 * DPR) {
+        const yy = y + Math.sin(x * .009 + time * 1.25 + i) * amp + Math.sin(x * .021 - time * .7) * 5 * DPR;
+        if (x === -20 * DPR) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+      }
+      ctx.strokeStyle = `hsla(${(i*18 + time*24)%360}, 100%, 75%, ${0.045 + (i%5)*0.01})`;
+      ctx.lineWidth = (1 + (i % 4) * .6) * DPR;
+      ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawCaustics() {
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < 55; i++) {
+      const x = (Math.sin(time * .17 + i * 9.71) * .5 + .5) * W + tiltX * 80 * DPR;
+      const y = (Math.cos(time * .14 + i * 4.33) * .5 + .5) * H + tiltY * 80 * DPR;
+      const r = (40 + (i % 9) * 22) * DPR;
+      const grd = ctx.createRadialGradient(x, y, 0, x, y, r);
+      grd.addColorStop(0, `hsla(${(time*40+i*27)%360}, 100%, 82%, .11)`);
+      grd.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawRipples(dt) {
+    ctx.globalCompositeOperation = 'screen';
+    for (const r of ripples) {
+      r.age += dt;
+      const radius = r.age * r.speed * 78;
+      const alpha = Math.max(0, 1 - r.age / 2.4) * r.strength;
+      for (let k = 0; k < 4; k++) {
+        ctx.beginPath();
+        ctx.arc(r.x + tiltX * 12 * DPR, r.y + tiltY * 12 * DPR, radius + k * 16 * DPR, 0, Math.PI * 2);
+        ctx.strokeStyle = `hsla(${(r.hue + k*52 + time*60)%360}, 100%, 78%, ${alpha * (0.20 - k*0.032)})`;
+        ctx.lineWidth = (2.2 - k*.25) * DPR;
+        ctx.stroke();
+      }
+      const core = ctx.createRadialGradient(r.x, r.y, 0, r.x, r.y, 38 * DPR);
+      core.addColorStop(0, `hsla(${r.hue}, 100%, 90%, ${alpha*.28})`);
+      core.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = core;
+      ctx.beginPath(); ctx.arc(r.x, r.y, 42 * DPR, 0, Math.PI*2); ctx.fill();
+    }
+    ripples = ripples.filter(r => r.age < 2.4);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.04, (now - last) / 1000);
+    last = now;
+    time += dt;
+    tiltX += (targetTiltX - tiltX) * .05;
+    tiltY += (targetTiltY - tiltY) * .05;
+
+    drawBackground();
+    drawCaustics();
+    drawRipples(dt);
+
+    // soft vignette
+    const vg = ctx.createRadialGradient(W*.5, H*.38, H*.1, W*.5, H*.5, Math.max(W,H)*.75);
+    vg.addColorStop(0, 'rgba(255,255,255,0)');
+    vg.addColorStop(1, 'rgba(0,8,25,.52)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+
+    const gx = 50 + tiltX * 38;
+    glow.style.left = gx + '%';
+    glow.style.transform = `translate(-50%, -50%) scale(${1 + Math.abs(tiltY)*.3})`;
+
+    for (const [id, p] of pointers) updateVoice(id, p.x, p.y);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
